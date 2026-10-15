@@ -1,0 +1,17 @@
+build/
+out/
+target/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+/.venv/
+/collision_meshes/
+*.cmf
+/rlbot/bot/
+checkpoints/
+wandb/
+.vs/
+CMakeUserPresets.json
+*.ilk
+*.pdb
