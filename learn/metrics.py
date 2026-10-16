@@ -63,3 +63,8 @@ class Wandb:
 
     def send(self, report):
         self.run.log(report.data)
+
+    # Without wandb's end-of-run printout
+    def finish(self):
+        self.run._settings.silent = True
+        self.run.finish()

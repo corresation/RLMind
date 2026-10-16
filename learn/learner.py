@@ -1,3 +1,4 @@
+import contextlib
 import glob
 import json
 import math
@@ -127,7 +128,7 @@ class Learner:
             cfg.sendMetrics = cfg.addRewardsToMetrics = False
             cfg.savePolicyVersions = cfg.skillTracker.enabled = False
 
-        sim.init(cfg.collisionMeshesPath)
+        sim.init(cfg.collisionMeshesPath, silent=True)
 
         print("Learner::Learner():")
         if cfg.randomSeed == -1:
@@ -369,15 +370,17 @@ class Learner:
                 if msvcrt.getwch().upper() == "Q":
                     quit = True
 
-            if cfg.checkpointFolder and (quit or self.totalTimesteps // cfg.tsPerSave > prevTimesteps // cfg.tsPerSave):
-                self.save()
-
             report.finish()
             if self.metrics:
                 self.metrics.send(report)
             report.display(displayRows)
 
+            if cfg.checkpointFolder and (quit or self.totalTimesteps // cfg.tsPerSave > prevTimesteps // cfg.tsPerSave):
+                self.save()
+
             if quit:
+                if self.metrics:
+                    self.metrics.finish()
                 return
 
     # Plays the newest save from any build folder in RocketSimVis, start RocketSimVis first
@@ -387,24 +390,27 @@ class Learner:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         stepTime = cfg.tickSkip / 120 / cfg.renderTimeScale
         nextStep = time.perf_counter()
-        lastCheck = -math.inf
+        checkSave = True
 
         while True:
-            if time.perf_counter() - lastCheck > 10:
-                lastCheck = time.perf_counter()
+            # On start and after each goal or reset
+            if checkSave:
                 saves = glob.glob(os.path.join(projectFolder, "out", "build", "*", "checkpoints", "*", "models.pt"))
                 if saves:
                     newest = os.path.dirname(max(saves, key=os.path.getmtime))
                     if newest != self.renderSave:
                         self.renderSave = newest
                         cfg.checkpointFolder = os.path.dirname(newest)
-                        self.load()
+                        with contextlib.redirect_stdout(None):
+                            self.load()
+                        print(f"\rWatching: {self.totalTimesteps:,} steps", end="", flush=True)
 
             self.envSet.reset()
             obs, masks = self.envSet.obs.copy(), self.envSet.actionMasks.copy()
             self.envSet.stepFirstHalf()
             actions, _ = self.actor(obs, masks)
             self.envSet.stepSecondHalf(actions)
+            checkSave = self.envSet.terminals[0] != 0
             sock.sendto(json.dumps(self.envSet.getRenderState(0)).encode(), renderAddress)
 
             while msvcrt.kbhit():
