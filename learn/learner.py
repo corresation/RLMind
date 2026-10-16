@@ -423,7 +423,6 @@ class Learner:
         folder = os.path.join(self.cfg.checkpointFolder, str(self.totalTimesteps))
         print(f'Saving to folder "{folder}"...')
         os.makedirs(folder, exist_ok=True)
-        torch.save(self.ppo.state(), os.path.join(folder, "models.pt"))
         stats = {
             "totalTimesteps": self.totalTimesteps, "totalIterations": self.totalIterations, "runId": self.runId,
             "tickSkip": self.cfg.tickSkip, "actionDelay": self.cfg.actionDelay,
@@ -435,6 +434,9 @@ class Learner:
             self.versions.save()
         with open(os.path.join(folder, "stats.json"), "w") as f:
             json.dump(stats, f, indent=4)
+        # Written last and renamed into place, so render mode never reads half a file
+        torch.save(self.ppo.state(), os.path.join(folder, "models.pt.tmp"))
+        os.replace(os.path.join(folder, "models.pt.tmp"), os.path.join(folder, "models.pt"))
 
         saved = self.checkpointDirs()
         if self.cfg.checkpointsToKeep != -1:
