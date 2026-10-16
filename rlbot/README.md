@@ -1,19 +1,53 @@
-# RLBot
+# RLMind RLBot bot
 
-This runs a trained RLMind checkpoint in Rocket League through RLBot v4. It doesn't train the model or support RLBot v5. No trained model is included.
+Runs an RLMind checkpoint in RLBotGUI.
 
-## Basic setup
+## Step 1: Copy the model
 
-1. Install [RLBot v4 / RLBotGUI](https://wiki.rlbot.org/v4/framework/operating-system-support/) and Rocket League on Windows
-2. Install this folder's Python packages:
+Copy `models.pt` from a checkpoint (`out/build/x64-RelWithDebInfo/checkpoints/<steps>/`) into `model/`:
 
-   ```bat
-   py -3.11 -m pip install -r rlbot/requirements.txt
-   ```
+```
+rlbot/
+├── model/
+│   └── models.pt
+├── bot.cfg
+├── appearance.cfg
+└── bot.py ...
+```
 
-   Run that command from the RLMind root. If RLBotGUI uses its own Python, install these packages there too!
+The layer sizes are read from `models.pt`, so any RLMind model works. If `models.pt` is missing, the bot won't run.
 
-3. Copy `models.pt` and `stats.json` from your preferred checkpoint into `rlbot/bot/`. Without a copied model, the bot uses the newest checkpoint under `out/build/*/checkpoints/`
-4. Load `rlbot/bot.cfg` in RLBotGUI, select the bot and start a match
+## Step 2: Configure the bot
 
-Use the same team size the model was trained for. The supplied setup trains 1v1. The name shown in RLBotGUI is `RLMind`; it comes from `bot.cfg`.
+### `bot.cfg`
+Edit `bot.cfg` to set:
+- Bot name
+- Developer name
+- Description etc.
+
+### `appearance.cfg`
+You can edit `appearance.cfg` in two ways:
+- Manually in a text editor
+- Through **RLBotGUI** (easier)
+
+This file controls:
+- Car appearance
+- Team colors
+
+Changes apply when the bot is launched.
+
+## Done
+
+1. Open **RLBotGUI**
+2. Add `bot.cfg` (or refresh the bot list)
+3. Add the bot to a match
+4. Launch Rocket League
+
+If the bot doesn't appear or doesn't move, check:
+- `models.pt` is in `model/`
+- Config edits
+
+## Notes
+
+- RLBotGUI must be installed and working
+- All paths in config files are relative to the bot folder

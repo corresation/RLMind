@@ -1,95 +1,50 @@
+from typing import Any
 import numpy as np
 
-from game_state import Player
 
-# Same as RLGC::LookupTableAction
 class LookupTableAction:
-    def __init__(self):
-        # Boolean input
-        R_B = (0, 1)
+    def __init__(self, bins=None):
+        super().__init__()
+        if bins is None:
+            self.bins = [(-1, 0, 1)] * 5
+        elif isinstance(bins[0], (float, int)):
+            self.bins = [bins] * 5
+        else:
+            assert len(bins) == 5, "Need bins for throttle, steer, pitch, yaw and roll"
+            self.bins = bins
+        self._lookup_table = self.make_lookup_table(self.bins)
 
-        R_F = (-1, 0, 1)
-
+    @staticmethod
+    def make_lookup_table(bins):
         actions = []
-
-        # Ground
-        for throttle in R_F:
-            for steer in R_F:
-                for boost in R_B:
-                    for handbrake in R_B:
-                        # Prevent useless throttle when boosting
+        # ground
+        for throttle in bins[0]:
+            for steer in bins[1]:
+                for boost in (0, 1):
+                    for handbrake in (0, 1):
                         if boost == 1 and throttle != 1:
                             continue
-
-                        actions.append([throttle, steer, 0, steer, 0, 0, boost, handbrake])
-
-        num_ground_actions = len(actions)
-
-        # Aerial
-        for pitch in R_F:
-            for yaw in R_F:
-                for roll in R_F:
-                    for jump in R_B:
-                        for boost in R_B:
-                            # Only need roll for sideflip
-                            if jump == 1 and yaw != 0:
+                        actions.append([throttle or boost, steer, 0, steer, 0, 0, boost, handbrake])
+        # aerial
+        for pitch in bins[2]:
+            for yaw in bins[3]:
+                for roll in bins[4]:
+                    for jump in (0, 1):
+                        for boost in (0, 1):
+                            if jump == 1 and yaw != 0:  # only need roll for sideflip
                                 continue
-
-                            # Duplicate with ground
-                            if pitch == roll and roll == jump and jump == 0:
+                            if pitch == roll == jump == 0:  # duplicate with ground
                                 continue
-
-                            # Enable handbrake for potential wavedashes
-                            handbrake = float(jump == 1 and (pitch != 0 or yaw != 0 or roll != 0))
-
+                            # enable handbrake for potential wavedashes
+                            handbrake = jump == 1 and (pitch != 0 or yaw != 0 or roll != 0)
                             actions.append([boost, yaw, pitch, yaw, roll, jump, boost, handbrake])
+        actions = np.array(actions)
+        return actions
 
-        self.actions = np.array(actions, dtype=np.float32)
+    def get_action_space(self):
+        return len(self._lookup_table)
 
-        self.ground_mask = np.zeros(len(actions), dtype=bool)
-        self.air_mask = np.zeros(len(actions), dtype=bool)
-        self.jump_mask = np.zeros(len(actions), dtype=bool)
-        self.boost_mask = np.zeros(len(actions), dtype=bool)
-
-        for i, action in enumerate(self.actions):
-            throttle, steer, pitch, yaw, roll, jump, boost, handbrake = action
-
-            if jump:
-                self.jump_mask[i] = True
-
-            if boost:
-                self.boost_mask[i] = True
-
-            if i < num_ground_actions:
-                self.ground_mask[i] = True
-
-            if i >= num_ground_actions and not jump:
-                self.air_mask[i] = True
-
-            # Add additional yaw-only actions to air mask
-            # These actions were skipped during air action generation to prevent duplicates
-            if i < num_ground_actions:
-                if throttle == boost and (yaw != 0) == handbrake:
-                    self.air_mask[i] = True
-
-    def get_action_amount(self) -> int:
-        return len(self.actions)
-
-    def parse_action(self, index: int) -> np.ndarray:
-        return self.actions[index]
-
-    def get_action_mask(self, player: Player) -> np.ndarray:
-        result = np.zeros(len(self.actions), dtype=bool)
-
-        if player.is_on_ground:
-            result |= self.ground_mask
-        else:
-            result |= self.air_mask
-
-        if player.boost == 0:
-            result &= ~self.boost_mask
-
-        if player.has_flip_or_jump or player.is_turtled:
-            result |= self.jump_mask
-
-        return result
+    def parse_actions(self, actions: Any) -> np.ndarray:
+        indexes = np.array(actions, dtype=np.int32)
+        indexes = np.squeeze(indexes)
+        return self._lookup_table[indexes]

@@ -1,124 +1,157 @@
-import glob
-import json
-import os
 import numpy as np
+import os
+import json
 import torch
+
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.structures.game_data_struct import GameTickPacket
-from torch import nn
 
-import common_values
-from lookup_table_action import LookupTableAction
-from game_state import GameState
-from obs import AdvancedObs, AdvancedObsPadded
+from util import common_values
+from util.game_state import GameState
+from util.player_data import PlayerData
 
-ACTIVATIONS = {"relu": nn.ReLU, "leakyRelu": nn.LeakyReLU, "sigmoid": nn.Sigmoid, "tanh": nn.Tanh}
+from agent import Agent as Agent_Base
+from obs import AdvancedObs
 
-def find_model_folder() -> str:
-    here = os.path.dirname(os.path.realpath(__file__))
-    if os.path.exists(os.path.join(here, "bot", "models.pt")):
-        return os.path.join(here, "bot")
+# in case kickoff model but in this case none
+import sys
 
-    saves = glob.glob(os.path.join(here, "..", "out", "build", "*", "checkpoints", "*", "models.pt"))
-    assert saves, "No model in bot/ and no checkpoints to use"
-    return os.path.dirname(max(saves, key=os.path.getmtime))
+import math
 
-def make_model(num_inputs: int, cfg: dict, num_outputs: int = 0) -> nn.Sequential:
-    layers = []
-    for size in cfg["layerSizes"]:
-        layers.append(nn.Linear(num_inputs, size))
-        if cfg["layerNorm"]:
-            layers.append(nn.LayerNorm(size))
-        layers.append(ACTIVATIONS[cfg["activation"]]())
-        num_inputs = size
-    if num_outputs:
-        layers.append(nn.Linear(num_inputs, num_outputs))
-    return nn.Sequential(*layers)
-
-def loadPolicy(folder: str):
-    state = torch.load(os.path.join(folder, "models.pt"), map_location="cpu", weights_only=False)
-    with open(os.path.join(folder, "stats.json")) as f:
-        stats = json.load(f)
-
-    configs = state["configs"]
-    head, head_size = None, state["obsSize"]
-    if "sharedHead" in configs:
-        head = make_model(head_size, configs["sharedHead"])
-        head.load_state_dict(state["models"]["sharedHead"])
-        head_size = configs["sharedHead"]["layerSizes"][-1]
-    policy = make_model(head_size, configs["policy"], state["numActions"])
-    policy.load_state_dict(state["models"]["policy"])
-
-    config = {"tickSkip": stats["tickSkip"], "actionDelay": stats["actionDelay"],
-              "obsSize": state["obsSize"], "numActions": state["numActions"]}
-    return config, head, policy
-
-def maskedProbs(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return torch.softmax(logits - 1e10 * ~mask, -1)
-
-class Bot(BaseAgent):
+class LittleThing(BaseAgent):
     def __init__(self, name, team, index):
         super().__init__(name, team, index)
-        folder = find_model_folder()
-        config, self.head, self.policy = loadPolicy(folder)
-        self.tickSkip, self.actionDelay = config["tickSkip"], config["actionDelay"]
-        self.obsSize = config["obsSize"]
-        self.deterministic = True
-        assert 0 <= self.actionDelay < self.tickSkip
 
-        # A padded model always takes the 3v3 size, so it works in any mode
-        self.obs_builder = AdvancedObsPadded() if self.obsSize == AdvancedObsPadded.OBS_SIZE else AdvancedObs()
-        self.action_parser = LookupTableAction()
-        assert self.action_parser.get_action_amount() == config["numActions"]
+        # main model
+        #print("Initializing main model...")
+        self.base_agent = Agent_Base()
+        self.base_obs_builder = AdvancedObs()
 
-        torch.set_num_threads(1)
+        # model switching state
+        self.current_model = "main"  # "main" or "kickoff"
+        self.model_switch_time = 0.0
+        self.kickoff_completed = True
 
-    @torch.no_grad()
-    def infer_action(self, t_obs, t_mask, deterministic):
-        logits = self.policy(self.head(t_obs) if self.head else t_obs)
-        probs = maskedProbs(logits, t_mask)
-        return int(probs.argmax()) if deterministic else int(torch.multinomial(probs, 1))
+        # normalization logic
+        self.obs_mean = None
+        self.obs_std = None
 
-    def initialize_agent(self):
-        self.game_state = GameState(self.get_field_info())
+
+        # config model tick skip
+        self.main_tick_skip = 8      # main model uses tick_skip = 8
+        self.kickoff_tick_skip = 4   # Kickoff model uses tick_skip = 4 for example
+        self.tick_skip = self.main_tick_skip  # active tick_skip
+        
+        self.game_state: GameState = None
         self.controls = SimpleControllerState()
-        self.action = np.zeros(common_values.NUM_ACTIONS)
-        self.prev_action = np.zeros(common_values.NUM_ACTIONS)
-        self.ticks = self.tickSkip
+        self.action = None
         self.update_action = True
-        self.prev_time = None
+        self.ticks = 0
+        self.prev_time = 0
+
+    def is_hot_reload_enabled(self):
+        return True
+
+    def initialize_agent(self, field_info=None):
+        if field_info is None:
+            field_info = type('FieldInfo', (), {'num_boosts': 34})()
+        self.field_info = field_info
+        self.game_state = GameState(self.field_info)
+        self.update_action = True
+        self.tick_skip = self.main_tick_skip  # main model tick_skip
+        self.ticks = self.tick_skip
+        self.controls = SimpleControllerState()
+        self.action = np.zeros(8)
+        self.current_model = "main"
+        self.kickoff_completed = False
+
+    def should_use_kickoff_model(self, packet): #in this case return false logic not needed
+        return False
+        """Determine if we should use the kickoff model"""
+        # use kickoff model during kickoff pause
+        if packet.game_info.is_kickoff_pause:
+            return True
+        
+        # kickoff model for a short time after kickoff ends to complete any ongoing actions
+        if self.current_model == "kickoff" and not packet.game_info.is_kickoff_pause:
+            time_since_kickoff = packet.game_info.seconds_elapsed - self.model_switch_time
+            if time_since_kickoff < 2.0:  # 2 second grace period
+                return True
+        
+        return False
+
+    def switch_to_kickoff_model(self, packet):
+        """Switch to kickoff model"""
+        if self.current_model != "kickoff":
+            #print(f"[bot] Switching to KICKOFF model at {packet.game_info.seconds_elapsed:.2f}s")
+            #print(f"[bot] Changing tick_skip from {self.tick_skip} to {self.kickoff_tick_skip}")
+            self.current_model = "kickoff"
+            self.model_switch_time = packet.game_info.seconds_elapsed
+            self.kickoff_completed = False
+            # tick_skip for kickoff model
+            self.tick_skip = self.kickoff_tick_skip
+
+    def switch_to_main_model(self, packet):
+        """Switch back to main model"""
+        if self.current_model != "main":
+            #print(f"[bot] Switching to MAIN model at {packet.game_info.seconds_elapsed:.2f}s")
+            #print(f"[bot] Changing tick_skip from {self.tick_skip} to {self.main_tick_skip}")
+            self.current_model = "main"
+            self.model_switch_time = packet.game_info.seconds_elapsed
+            self.kickoff_completed = True
+            # tick_skip for main model
+            self.tick_skip = self.main_tick_skip
 
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
         cur_time = packet.game_info.seconds_elapsed
-        ticks_elapsed = 1 if self.prev_time is None else round((cur_time - self.prev_time) * common_values.TICK_RATE)
+        delta = cur_time - self.prev_time
         self.prev_time = cur_time
 
+        ticks_elapsed = round(delta * 120)
         self.ticks += ticks_elapsed
         self.game_state.decode(packet, ticks_elapsed)
 
-        # Same timing as Nexto's RLBot bot, which actionDelay = tickSkip - 1 is based on
-        if self.update_action:
+        # switching logic
+        if self.should_use_kickoff_model(packet):
+            self.switch_to_kickoff_model(packet)
+        else:
+            self.switch_to_main_model(packet)
+
+        # action update logic
+        if self.update_action and len(self.game_state.players) > self.index:
             self.update_action = False
-
             player = self.game_state.players[self.index]
-            obs = self.obs_builder.build_obs(player, self.game_state, self.prev_action)
-            assert len(obs) == self.obsSize, f"Obs is {len(obs)} long, the model wants {self.obsSize} (wrong game mode?)"
-            t_obs = torch.as_tensor(obs)
-            t_mask = torch.as_tensor(self.action_parser.get_action_mask(player))
-            self.action = self.action_parser.parse_action(self.infer_action(t_obs, t_mask, self.deterministic))
+            teammates = [p for p in self.game_state.players if p.team_num == self.team and p != player]
+            opponents = [p for p in self.game_state.players if p.team_num != self.team]
+            self.game_state.players = [player] + teammates + opponents
 
-            self.prev_action = self.action
+            # which model to use based on current state, the kickoff model is unused
+            if self.current_model == "kickoff":
+                # kickoff model
+                obs = self.kickoff_obs_builder.build_obs(player, self.game_state, self.action)
+                if self.obs_mean is not None and self.obs_std is not None:
+                    obs = (obs - self.obs_mean) / self.obs_std
+                self.action = self.kickoff_agent.act(obs)
+                #print(f"[bot] Using KICKOFF model (tick_skip={self.tick_skip}) - Action: {self.action}")
+            else:
+                # main model
+                obs = self.base_obs_builder.build_obs(player, self.game_state, self.action)
+                if self.obs_mean is not None and self.obs_std is not None:
+                    obs = (obs - self.obs_mean) / self.obs_std
+                self.action = self.base_agent.act(obs)
+                #print(f"[bot] Using MAIN model (tick_skip={self.tick_skip}) - Action: {self.action}")
 
-        if self.ticks >= self.actionDelay:
+        if self.ticks >= self.tick_skip - 1:
             self.update_controls(self.action)
 
-        if self.ticks >= self.tickSkip:
+        if self.ticks >= self.tick_skip:
             self.ticks = 0
             self.update_action = True
 
+
         return self.controls
 
-    def update_controls(self, action: np.ndarray):
+    def update_controls(self, action):
         self.controls.throttle = action[0]
         self.controls.steer = action[1]
         self.controls.pitch = action[2]

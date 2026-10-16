@@ -1,76 +1,104 @@
 import numpy as np
+from typing import List, Optional
 
-import common_values
-from game_state import GameState, Player
-from phys_state import PhysState
+from util import common_values
+from util.game_state import GameState
+from util.player_data import PlayerData
+from util.physics_object import PhysicsObject
 
-PLAYER_OBS_SIZE = 29
 
-# Same as RLGC::AdvancedObs
 class AdvancedObs:
-    POS_COEF = 1 / 5000
-    VEL_COEF = 1 / 2300
-    ANG_VEL_COEF = 1 / 3
+    POS_COEF = 1.0 / 5000.0
+    VEL_COEF = 1.0 / 2300.0
+    ANG_VEL_COEF = 1.0 / 3.0
 
-    @staticmethod
-    def get_obs_size(players_per_team: int) -> int:
-        return 9 + common_values.NUM_ACTIONS + common_values.BOOST_LOCATIONS_AMOUNT + PLAYER_OBS_SIZE * players_per_team * 2
+    def __init__(self):
+        # Initialize the ID tracker to None
+        self.target_opponent_id: Optional[int] = None
 
-    def add_player_to_obs(self, obs: list, player: Player, inv: bool, ball: PhysState):
-        phys = player.phys.invert() if inv else player.phys
-        rot_t = phys.rot_mat.T # Same as RotMat::Dot()
+    def _add_player_to_obs(self, out: List[float], player: PlayerData, inverted: bool, ball_phys: PhysicsObject):
+        car = player.inverted_car_data if inverted else player.car_data
 
-        obs += [
-            phys.pos * self.POS_COEF,
-            phys.forward,
-            phys.up,
-            phys.vel * self.VEL_COEF,
-            phys.ang_vel * self.ANG_VEL_COEF,
-            rot_t @ phys.ang_vel * self.ANG_VEL_COEF,
+        rot = car.rotation_mtx()  # columns: [forward, left, up]
+        forward = rot[:, 0]
+        up = rot[:, 2]
 
-            rot_t @ (ball.pos - phys.pos) * self.POS_COEF,
-            rot_t @ (ball.vel - phys.vel) * self.VEL_COEF,
+        local_ang = rot.T @ car.angular_velocity
+        local_rel_pos = rot.T @ (ball_phys.position - car.position)
+        local_rel_vel = rot.T @ (ball_phys.linear_velocity - car.linear_velocity)
 
-            [player.boost / 100, player.is_on_ground, player.has_flip_or_jump, player.is_demoed, player.has_jumped],
-        ]
+        out += (car.position * self.POS_COEF).tolist()
+        out += forward.tolist()
+        out += up.tolist()
+        out += (car.linear_velocity * self.VEL_COEF).tolist()
+        out += (car.angular_velocity * self.ANG_VEL_COEF).tolist()
+        out += (local_ang * self.ANG_VEL_COEF).tolist()
 
-    def build_obs(self, player: Player, state: GameState, prev_action: np.ndarray) -> np.ndarray:
-        inv = player.team == common_values.ORANGE_TEAM
+        out += (local_rel_pos * self.POS_COEF).tolist()
+        out += (local_rel_vel * self.VEL_COEF).tolist()
 
-        ball = state.ball.invert() if inv else state.ball
-        pads = state.get_boost_pads(inv)
-        pad_timers = state.get_boost_pad_timers(inv)
+        out.append(float(player.boost_amount))
+        out.append(1.0 if player.on_ground else 0.0)
+        out.append(1.0 if (player.has_flip or player.has_jump) else 0.0)
+        out.append(1.0 if player.is_demoed else 0.0)
+        out.append(1.0 if getattr(player, "has_jumped", False) else 0.0)
 
-        obs = [
-            ball.pos * self.POS_COEF,
-            ball.vel * self.VEL_COEF,
-            ball.ang_vel * self.ANG_VEL_COEF,
-            prev_action,
-            np.where(pads > 0, 1, 1 / (1 + pad_timers)),
-        ]
+    def build_obs(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> np.ndarray:
+        obs: List[float] = []
 
-        self.add_player_to_obs(obs, player, inv, ball)
+        inverted = (player.team_num == common_values.ORANGE_TEAM)
+        ball = state.inverted_ball if inverted else state.ball
 
-        teammates, opponents = [], []
-        for other in state.players:
-            if other.car_id == player.car_id:
-                continue
-            self.add_player_to_obs(teammates if other.team == player.team else opponents, other, inv, ball)
+        obs += (ball.position * self.POS_COEF).tolist()
+        obs += (ball.linear_velocity * self.VEL_COEF).tolist()
+        obs += (ball.angular_velocity * self.ANG_VEL_COEF).tolist()
 
-        return self.combine(obs, teammates, opponents)
+        prev = np.asarray(previous_action, dtype=np.float32).reshape(-1)
+        if prev.size != 8:
+            if prev.size < 8:
+                prev = np.pad(prev, (0, 8 - prev.size))
+            else:
+                prev = prev[:8]
+        obs += prev.tolist()
 
-    def combine(self, obs: list, teammates: list, opponents: list) -> np.ndarray:
-        return np.concatenate([np.asarray(x, dtype=np.float32) for x in obs + teammates + opponents])
+        pads = state.get_boost_pads(inverted)
+        timers = state.get_boost_pad_timers(inverted)
+        for i in range(pads.shape[0]):
+            if pads[i] >= 0.5:
+                obs.append(1.0)
+            else:
+                obs.append(1.0 / (1.0 + float(timers[i])))
 
-# Same as RLGC::AdvancedObsPadded, zeros for missing players up to 2 teammates and 3 opponents
-class AdvancedObsPadded(AdvancedObs):
-    MAX_TEAMMATES = 2
-    MAX_OPPONENTS = 3
-    OBS_SIZE = AdvancedObs.get_obs_size(3)
+        self._add_player_to_obs(obs, player, inverted, ball)
 
-    def combine(self, obs: list, teammates: list, opponents: list) -> np.ndarray:
-        num_teammates = sum(np.size(x) for x in teammates) // PLAYER_OBS_SIZE
-        num_opponents = sum(np.size(x) for x in opponents) // PLAYER_OBS_SIZE
-        teammates = teammates + [np.zeros(PLAYER_OBS_SIZE * max(self.MAX_TEAMMATES - num_teammates, 0))]
-        opponents = opponents + [np.zeros(PLAYER_OBS_SIZE * max(self.MAX_OPPONENTS - num_opponents, 0))]
-        return super().combine(obs, teammates, opponents)
+        opponents = [p for p in state.players if p.team_num != player.team_num and p.car_id != player.car_id]
+        
+        target_opponent = None
+
+
+        if self.target_opponent_id is not None:
+            found = next((p for p in opponents if p.car_id == self.target_opponent_id), None)
+            if found:
+                target_opponent = found
+            else:
+
+                self.target_opponent_id = None
+
+
+        if target_opponent is None and len(opponents) > 0:
+            target_opponent = opponents[0]
+            self.target_opponent_id = target_opponent.car_id
+
+        if target_opponent is not None:
+            self._add_player_to_obs(obs, target_opponent, inverted, ball)
+        else:
+
+            obs += [0.0] * 29
+
+        if len(obs) != 109:
+            if len(obs) > 109:
+                obs = obs[:109]
+            else:
+                obs.extend([0.0] * (109 - len(obs)))
+
+        return np.asarray(obs, dtype=np.float32)
