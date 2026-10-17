@@ -423,7 +423,9 @@ class Learner:
     def checkpointDirs(self):
         if not os.path.isdir(self.cfg.checkpointFolder):
             return []
-        return sorted(int(name) for name in os.listdir(self.cfg.checkpointFolder) if name.isdigit())
+        folder = self.cfg.checkpointFolder
+        # Saves still being written have no models.pt yet
+        return sorted(int(name) for name in os.listdir(folder) if name.isdigit() and os.path.exists(os.path.join(folder, name, "models.pt")))
 
     def save(self):
         folder = os.path.join(self.cfg.checkpointFolder, str(self.totalTimesteps))

@@ -77,6 +77,7 @@ def main():
 
     cfg.sendMetrics = True  # wandb
     cfg.renderMode = "render" in sys.argv
+    cfg.ppo.deterministic = cfg.renderMode
 
     learner = Learner(makeEnv, cfg)
     learner.start(stepCallback)
