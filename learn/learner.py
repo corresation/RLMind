@@ -107,12 +107,10 @@ displayRows = [
     "-Inference Time",
     "-Env Step Time",
     "Consumption Time",
-    "-Critic Infer Time",
     "-GAE Time",
     "-PPO Learn Time",
     "",
     "Collected Timesteps",
-    "Experience Timesteps",
     "Total Timesteps",
     "Total Iterations",
 ]
@@ -456,7 +454,8 @@ class Learner:
         print(f'Loading most recent checkpoint in "{self.cfg.checkpointFolder}"...')
         saved = self.checkpointDirs()
         if not saved:
-            print(" > No checkpoints found, starting new model.")
+            if not self.cfg.renderMode:
+                print(" > No checkpoints found, starting new model.")
             return
         folder = os.path.join(self.cfg.checkpointFolder, str(saved[-1]))
         print(f' > Loading checkpoint "{folder}"...')

@@ -120,7 +120,7 @@ class PolicyVersions:
 
             stats = envSet.getStats()
             for g in np.flatnonzero(stats["goalScored"]):
-                ballY = stats["ballPos"][envSet.arenaPlayerStartIdx[g], 1]
+                ballY = stats["ballPos"][g, 1]
                 concededTeam = 0 if ballY < 0 else 1
                 mode = self.gameModes[g]
                 if concededTeam != newTeam:

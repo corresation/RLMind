@@ -30,7 +30,7 @@ namespace RLGC {
 			BLUE_GOAL_BACK = Vec(0, -BACK_NET_Y, GOAL_HEIGHT / 2);
 
 		constexpr float
-			BALL_RADIUS = 92.75, // :nerd::point_up: "erm it is actually 91.25"
+			BALL_RADIUS = 91.25,
 
 			BALL_MAX_SPEED = 6000,
 			CAR_MAX_SPEED = 2300,
@@ -70,7 +70,7 @@ namespace RLGC {
 				{-3584.0, 2484.0, 70.0},
 				{3584.0, 2484.0, 70.0},
 				{0.0, 2816.0, 70.0},
-				{-940.0, 3310.0, 70.0},
+				{-940.0, 3308.0, 70.0},
 				{940.0, 3308.0, 70.0},
 				{-3072.0, 4096.0, 73.0},
 				{3072.0, 4096.0, 73.0},
