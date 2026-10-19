@@ -11,5 +11,9 @@ namespace RLGC {
 
 		// NOTE: May be called once during environment initialization to determine policy neuron size
 		virtual FList BuildObs(const Player& player, const GameState& state) = 0;
+
+		// For attention, 0 = not split
+		virtual int GetQuerySize() { return 0; }
+		virtual int GetTokenSize() { return 0; }
 	};
 }

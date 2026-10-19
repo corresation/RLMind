@@ -18,7 +18,7 @@ import sys
 
 import math
 
-class LittleThing(BaseAgent):
+class ExampleBot(BaseAgent): # Skidded from LittleThing so sorry
     def __init__(self, name, team, index):
         super().__init__(name, team, index)
 

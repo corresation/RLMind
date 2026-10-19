@@ -144,7 +144,8 @@ class Learner:
         self.envSet = sim.EnvSet([makeEnv(i) for i in range(cfg.numGames)], cfg.tickSkip, cfg.actionDelay, cfg.addRewardsToMetrics)
 
         print("\tMaking PPO learner...")
-        self.ppo = PPO(self.envSet.obsSize, self.envSet.numActions, cfg.ppo, self.device)
+        self.ppo = PPO(
+            self.envSet.obsSize, self.envSet.numActions, cfg.ppo, self.device, self.envSet.obsQuerySize, self.envSet.obsTokenSize)
         assert cfg.ppo.batchSize <= cfg.ppo.timestepsPerIteration, "batchSize can't be bigger than timestepsPerIteration"
 
         self.returnStat = WelfordStat() if cfg.standardizeReturns else None

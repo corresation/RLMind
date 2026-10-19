@@ -8,7 +8,7 @@ from torch import nn
 actionDisabledLogit = -1e10
 actionMinProb = 1e-11
 
-activations = {"relu": nn.ReLU, "leakyRelu": nn.LeakyReLU, "sigmoid": nn.Sigmoid, "tanh": nn.Tanh}
+activations = {"relu": nn.ReLU, "leakyRelu": nn.LeakyReLU, "sigmoid": nn.Sigmoid, "tanh": nn.Tanh, "gelu": nn.GELU}
 optims = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW, "adagrad": torch.optim.Adagrad, "rmsprop": torch.optim.RMSprop}
 
 
@@ -34,6 +34,11 @@ class PPOConfig:
     policy: ModelConfig = field(default_factory=ModelConfig)
     critic: ModelConfig = field(default_factory=ModelConfig)
     sharedHead: ModelConfig = field(default_factory=lambda: ModelConfig([256]))  # Empty layerSizes = no shared head
+
+    attention: bool = False  # Needs sim.AttentionObs() and sharedHead.layerSizes = []
+    attentionBlocks: int = 2
+    attentionHeads: int = 4
+    attentionSize: int = 128
 
     epochs: int = 2
     policyLR: float = 3e-4
@@ -65,6 +70,56 @@ def makeModel(numInputs, cfg, numOutputs=None):
     return nn.Sequential(*layers)
 
 
+# Ref from https://github.com/Rolv-Arild/EARL-pytorch
+# Cross-attention Is All You Need
+class AttentionBlock(nn.Module):
+    def __init__(self, size, numHeads, activation):
+        super().__init__()
+        self.numHeads = numHeads
+        self.queryNorm, self.tokenNorm, self.ffNorm = nn.LayerNorm(size), nn.LayerNorm(size), nn.LayerNorm(size)
+        self.query = nn.Linear(size, size)
+        self.keyValue = nn.Linear(size, size * 2)
+        self.out = nn.Linear(size, size)
+        self.ff = nn.Sequential(nn.Linear(size, size * 4), activations[activation](), nn.Linear(size * 4, size))
+
+        # Starts as identity
+        for layer in (self.out, self.ff[-1]):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, x, tokens, empty):
+        # PyTorch kernels were 4x slower, so here's it written out
+        q = self.query(self.queryNorm(x)).unflatten(-1, (self.numHeads, -1))
+        k, v = self.keyValue(self.tokenNorm(tokens)).unflatten(-1, (2, self.numHeads, -1)).unbind(2)
+        scores = torch.einsum("bhd,bnhd->bhn", q, k) / math.sqrt(q.shape[-1])
+        weights = scores.masked_fill(empty[:, None], float("-inf")).softmax(-1)
+        x = x + self.out(torch.einsum("bhn,bnhd->bhd", weights, v).flatten(1))
+        return x + self.ff(self.ffNorm(x))
+
+
+class AttentionEncoder(nn.Module):
+    def __init__(self, querySize, tokenSize, size, numHeads, numBlocks, activation):
+        super().__init__()
+        assert numBlocks > 0, "attentionBlocks must be at least 1"
+        assert numHeads > 0 and size % numHeads == 0, "attentionSize must be a multiple of attentionHeads"
+        self.querySize, self.tokenSize = querySize, tokenSize
+        self.queryEmbed = nn.Sequential(nn.Linear(querySize, size), activations[activation](), nn.Linear(size, size))
+        self.tokenEmbed = nn.Sequential(nn.Linear(tokenSize, size), activations[activation](), nn.Linear(size, size))
+        self.blocks = nn.ModuleList(AttentionBlock(size, numHeads, activation) for _ in range(numBlocks))
+        self.norm = nn.LayerNorm(size)
+
+    def forward(self, obs):
+        tokens = obs[:, self.querySize:].unflatten(1, (-1, self.tokenSize))
+        empty = (tokens == 0).all(-1)
+        empty[:, 0] = False  # Ball
+
+        x = self.queryEmbed(obs[:, :self.querySize])
+        tokens = self.tokenEmbed(tokens)
+        for block in self.blocks:
+            x = block(x, tokens, empty)
+        return self.norm(x)
+
+
 def policyProbs(models, obs, masks, temperature):
     if "sharedHead" in models:
         obs = models["sharedHead"](obs)
@@ -86,11 +141,12 @@ def paramVec(model):
 
 
 class PPO:
-    def __init__(self, obsSize, numActions, cfg, device):
+    def __init__(self, obsSize, numActions, cfg, device, querySize=0, tokenSize=0):
         self.cfg = cfg
         self.device = device
         self.obsSize = obsSize
         self.numActions = numActions
+        self.querySize, self.tokenSize = querySize, tokenSize
         if not cfg.miniBatchSize:
             cfg.miniBatchSize = cfg.batchSize
         assert cfg.batchSize % cfg.miniBatchSize == 0, "batchSize must be a multiple of miniBatchSize"
@@ -100,8 +156,18 @@ class PPO:
         if cfg.sharedHead.layerSizes:
             self.models["sharedHead"] = makeModel(obsSize, cfg.sharedHead)
             headSize = cfg.sharedHead.layerSizes[-1]
-        self.models["policy"] = makeModel(headSize, cfg.policy, numActions)
-        self.models["critic"] = makeModel(headSize, cfg.critic, 1)
+
+        assert cfg.attention == bool(querySize), "sim.AttentionObs() and attention = True only work together"
+        if cfg.attention:
+            assert not cfg.sharedHead.layerSizes, "Attention has no shared head, set sharedHead.layerSizes = []"
+            for name, numOutputs in (("policy", numActions), ("critic", 1)):
+                modelCfg = getattr(cfg, name)
+                encoder = AttentionEncoder(
+                    querySize, tokenSize, cfg.attentionSize, cfg.attentionHeads, cfg.attentionBlocks, modelCfg.activation)
+                self.models[name] = nn.Sequential(encoder, *makeModel(cfg.attentionSize, modelCfg, numOutputs))
+        else:
+            self.models["policy"] = makeModel(headSize, cfg.policy, numActions)
+            self.models["critic"] = makeModel(headSize, cfg.critic, 1)
 
         modelCfgs = {"sharedHead": cfg.sharedHead, "policy": cfg.policy, "critic": cfg.critic}
         self.optims = {}
@@ -226,18 +292,30 @@ class PPO:
         for name, model in self.models.items():
             report[magnitudeNames[name] + " Update Magnitude"] = (paramVec(model) - before[name]).norm().item()
 
+    def attentionConfig(self):
+        cfg = self.cfg
+        if not cfg.attention:
+            return None
+        return {"blocks": cfg.attentionBlocks, "heads": cfg.attentionHeads, "size": cfg.attentionSize,
+                "querySize": self.querySize, "tokenSize": self.tokenSize}
+
     def state(self):
         cfg = self.cfg
         return {
             "models": {name: model.state_dict() for name, model in self.models.items()},
             "optims": {name: optim.state_dict() for name, optim in self.optims.items()},
             "configs": {name: asdict(getattr(cfg, name)) for name in self.models},
+            "attention": self.attentionConfig(),
             "obsSize": self.obsSize,
             "numActions": self.numActions,
             "policyTemperature": cfg.policyTemperature,
         }
 
     def loadState(self, state):
+        configs = {name: asdict(getattr(self.cfg, name)) for name in self.models}
+        attention = self.attentionConfig()
+        if state["configs"] != configs or state.get("attention", attention) != attention:
+            raise RuntimeError(f"Save has different model settings\nSave: {state['configs']} {state.get('attention')}\nNow: {configs} {attention}")
         for name, model in self.models.items():
             model.load_state_dict(state["models"][name])
         for name, optim in self.optims.items():

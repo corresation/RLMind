@@ -71,7 +71,7 @@ def main():
     cfg.ppo.policyLR = 2e-4
     cfg.ppo.criticLR = 2e-4
 
-    cfg.ppo.sharedHead.layerSizes = [512, 512, 512]
+    cfg.ppo.sharedHead.layerSizes = [512, 512, 512]  # Must leave blank if attention
     cfg.ppo.policy.layerSizes = [512, 512, 512]
     cfg.ppo.critic.layerSizes = [512, 512, 512]
 

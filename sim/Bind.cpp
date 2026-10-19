@@ -9,6 +9,7 @@
 #include "obs/DefaultObs.h"
 #include "obs/DefaultObsPadded.h"
 #include "obs/AdvancedObs.h"
+#include "obs/AttentionObs.h"
 #include "rewards/CommonRewards.h"
 #include "rewards/ZeroSumReward.h"
 #include "actions/LookupTableAction.h"
@@ -302,6 +303,8 @@ NB_MODULE(_sim, m) {
 		.def_prop_ro("numPlayers", [](PyEnvSet& e) { return e.state.numPlayers; })
 		.def_prop_ro("obsSize", [](PyEnvSet& e) { return e.state.obs.size[1]; })
 		.def_prop_ro("numActions", [](PyEnvSet& e) { return e.state.actionMasks.size[1]; })
+		.def_prop_ro("obsQuerySize", [](PyEnvSet& e) { return e.obsBuilders[0]->GetQuerySize(); })
+		.def_prop_ro("obsTokenSize", [](PyEnvSet& e) { return e.obsBuilders[0]->GetTokenSize(); })
 		.def_prop_ro("obs", [](PyEnvSet& e) {
 			auto& obs = e.state.obs;
 			return View(obs.data, { obs.size[0], obs.size[1] });
@@ -354,6 +357,7 @@ NB_MODULE(_sim, m) {
 	nb::class_<DefaultObs, ObsBuilder>(m, "DefaultObs").def(nb::init<>());
 	nb::class_<DefaultObsPadded, DefaultObs>(m, "DefaultObsPadded").def(nb::init<int>(), "maxPlayers"_a);
 	nb::class_<AdvancedObs, ObsBuilder>(m, "AdvancedObs").def(nb::init<>());
+	nb::class_<AttentionObs, AdvancedObs>(m, "AttentionObs").def(nb::init<int>(), "maxPlayers"_a = 3);
 
 	// Action parsers
 	nb::class_<ActionParser>(m, "ActionParser");
