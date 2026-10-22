@@ -1,7 +1,7 @@
-# RocketSim v3 (ZealanL/RocketSim branch v3-rust, commit 6cf55d3, version 0.2.11), workspace fields filled in
+# RocketSim v3 (ZealanL/RocketSim branch v3-rust, commit d186e95, version 0.3.2), workspace fields filled in
 [package]
 name = "rocketsim"
-version = "0.2.11"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.95"
 description = "Simulate Rocket League games at maximum efficiency"
@@ -13,7 +13,7 @@ arrayvec = "0.7.6"
 byteorder = "1.5.0"
 fastrand = "2.3.0"
 fern = "0.7.1"
-glam = { version = "0.33.5", features = ["debug-glam-assert"] }
+glam = { version = "0.34", features = ["debug-glam-assert"] }
 log = "0.4.29"
 rustc-hash = "2.1.2"
 serde = { version = "1", features = ["derive"], optional = true }

@@ -7,7 +7,7 @@ use fastrand::Rng;
 use glam::{Affine3A, EulerRot, Mat3A, Vec3A};
 
 use crate::{
-    CarBodyConfig, CarControls, CarState, GameMode, MutatorConfig, PhysState, Team,
+    CarBodyConfig, CarControls, CarCore, CarState, GameMode, MutatorConfig, PhysState, Team,
     bullet::{
         collision::{
             broadphase::CollisionFilterGroups,
@@ -189,9 +189,13 @@ impl Car {
             bullet_vehicle: VehicleRL::new(rigid_body_idx, wheels),
             vel_impulse_cache: Vec3A::ZERO,
             sticky_gate_prev: false,
-            state: CarState {
-                boost: mutator_config.car_spawn_boost_amount,
-                ..Default::default()
+            state: {
+                let mut state = CarState::from(CarCore::grounded(
+                    CarCore::DEFAULT.phys,
+                    mutator_config.car_spawn_boost_amount,
+                ));
+                state.cache.is_on_ground = true;
+                state
             },
         }
     }
@@ -238,25 +242,23 @@ impl Car {
         let spawn_pos_idx = rng.usize(0..respawn_locations.len());
         let spawn_pos = respawn_locations[spawn_pos_idx];
 
-        let new_state = CarState {
-            phys: PhysState {
-                pos: Vec3A::new(
-                    spawn_pos.x,
-                    spawn_pos.y * -self.team.get_y_dir(),
-                    car_consts::spawn::RESPAWN_Z,
-                ),
-                rot_mat: Mat3A::from_euler(
-                    EulerRot::ZYX,
-                    spawn_pos.yaw_ang + if self.team == Team::Blue { 0.0 } else { PI },
-                    0.0,
-                    0.0,
-                ),
-                vel: Vec3A::ZERO,
-                ang_vel: Vec3A::ZERO,
-            },
-            boost: boost_amount,
-            ..Default::default()
+        let phys = PhysState {
+            pos: Vec3A::new(
+                spawn_pos.x,
+                spawn_pos.y * -self.team.get_y_dir(),
+                car_consts::spawn::RESPAWN_Z,
+            ),
+            rot_mat: Mat3A::from_euler(
+                EulerRot::ZYX,
+                spawn_pos.yaw_ang + if self.team == Team::Blue { 0.0 } else { PI },
+                0.0,
+                0.0,
+            ),
+            vel: Vec3A::ZERO,
+            ang_vel: Vec3A::ZERO,
         };
+        let mut new_state = CarState::from(CarCore::grounded(phys, boost_amount));
+        new_state.cache.is_on_ground = true;
 
         self.set_state(rb, &new_state);
 
@@ -280,6 +282,39 @@ impl Car {
         );
     }
 
+    pub(crate) fn refresh_contacts(&mut self, world: &DiscreteDynamicsWorld) {
+        if self.state.is_demoed {
+            self.reset_transient_contacts();
+            return;
+        }
+
+        self.sticky_gate_prev = self.bullet_vehicle.refresh_wheel_contacts(
+            world,
+            &world.bodies()[self.rigid_body_idx],
+            TICK_TIME,
+        );
+        self.update_contact_state(world);
+        self.state.cache.world_contact_normal = None;
+    }
+
+    pub(crate) fn refresh_contact_state(&mut self, world: &DiscreteDynamicsWorld) {
+        self.state.cache.wheels_with_contact = if self.state.is_demoed {
+            [None; 4]
+        } else {
+            self.bullet_vehicle
+                .query_wheel_contacts(world, &world.bodies()[self.rigid_body_idx])
+        };
+        self.state.cache.is_on_ground = self.state.num_wheels_in_contact() >= 3;
+    }
+
+    pub(crate) fn reset_transient_contacts(&mut self) {
+        self.bullet_vehicle.reset_transient_contacts();
+        self.sticky_gate_prev = false;
+        self.state.cache.is_on_ground = false;
+        self.state.cache.wheels_with_contact = [None; 4];
+        self.state.cache.world_contact_normal = None;
+    }
+
     /// Hitbox/suspension preset (same as `info.config`).
     #[must_use]
     pub const fn get_config(&self) -> &CarBodyConfig {
@@ -292,22 +327,26 @@ impl Car {
     }
 
     pub(crate) fn set_state(&mut self, rb: &mut RigidBody, state: &CarState) {
+        self.state = *state;
+        self.sync_state_to_body(rb);
+    }
+
+    pub(crate) fn sync_state_to_body(&mut self, rb: &mut RigidBody) {
         debug_assert_eq!(rb.user_idx, UserInfoType::Car);
         debug_assert_eq!(rb.world_array_idx, self.rigid_body_idx);
 
         rb.set_world_trans(Affine3A {
-            matrix3: state.phys.rot_mat,
-            translation: state.phys.pos * UU_TO_BT,
+            matrix3: self.state.phys.rot_mat,
+            translation: self.state.phys.pos * UU_TO_BT,
         });
         rb.interp_world_trans = *rb.get_world_trans();
 
-        rb.lin_vel = state.phys.vel * UU_TO_BT;
-        rb.ang_vel = state.phys.ang_vel;
+        rb.lin_vel = self.state.phys.vel * UU_TO_BT;
+        rb.ang_vel = self.state.phys.ang_vel;
         rb.clear_accum_vels();
         rb.update_inertia_tensor();
 
         self.vel_impulse_cache = Vec3A::ZERO;
-        self.state = *state;
     }
 
     /////////////////////////////
@@ -446,7 +485,10 @@ impl Car {
                 && rel_dodge_torque.y.signum() == self.state.controls.pitch.signum()
                 && prev_flip_time >= flip::PITCH_CANCEL_GATE_MIN_TIME
             {
-                pitch_scale = 1.0 - self.state.controls.pitch.abs().min(1.0);
+                pitch_scale = 1.0
+                    - quantize_axis_input(-self.state.controls.pitch)
+                        .abs()
+                        .min(1.0);
             }
 
             rel_dodge_torque.y *= pitch_scale;
@@ -467,7 +509,7 @@ impl Car {
             if inputs != Vec3A::ZERO
                 && (prev_is_flipping
                     || self.state.is_flipping
-                    || self.state.has_flipped && prev_flip_time < flip::PITCHLOCK_EXTRA_TIME)
+                    || prev_flip_time < flip::PITCHLOCK_EXTRA_TIME)
             {
                 pitch_torque_scale = 0.0;
             }
@@ -497,7 +539,7 @@ impl Car {
         }
 
         if allow_air {
-            let throttle_scale = if self.state.controls.boost || self.state.is_boosting {
+            let throttle_scale = if self.state.is_boosting {
                 1.0
             } else {
                 quantize_axis_input(self.state.controls.throttle)
@@ -525,7 +567,7 @@ impl Car {
         let up_dir = self.state.get_up_dir();
 
         // Check jump activation
-        if !self.state.has_jumped && self.state.is_on_ground && jump_pressed {
+        if !self.state.has_jumped && self.state.cache.is_on_ground && jump_pressed {
             self.state.is_jumping = true;
             self.state.has_jumped = true;
             self.state.jump_ticks = 0;
@@ -570,6 +612,7 @@ impl Car {
         if jump_pressed
             && self
                 .state
+                .cache
                 .world_contact_normal
                 .is_some_and(|world_contact_normal| {
                     world_contact_normal.z > car_consts::autoflip::NORM_Z_THRESH
@@ -617,28 +660,30 @@ impl Car {
         mutator_config: &MutatorConfig,
         jump_pressed: bool,
         forward_speed_uu: f32,
+        was_is_jumping: bool,
     ) -> bool {
-        if self.state.is_on_ground {
+        if self.state.cache.is_on_ground {
             self.state.has_double_jumped = false;
             self.state.has_flipped = false;
             self.state.air_time = 0.0;
             self.state.air_time_since_jump = 0.0;
-            self.state.flip_time = 0.0;
+            self.state.flip_time += TICK_TIME;
+
             return false;
         }
 
         self.state.air_time += TICK_TIME;
 
-        if self.state.has_jumped && !self.state.is_jumping {
+        if self.state.has_jumped && !was_is_jumping && !self.state.is_jumping {
             self.state.air_time_since_jump += TICK_TIME;
         } else {
             self.state.air_time_since_jump = 0.0;
         }
 
         if jump_pressed && self.state.air_time_since_jump < car_consts::jump::DOUBLEJUMP_MAX_DELAY {
-            let input_magnitude = self.state.controls.yaw.abs()
-                + self.state.controls.pitch.abs()
-                + self.state.controls.roll.abs();
+            const PYR_SCALE: Vec3A = Vec3A::new(-1.0, 1.0, 1.0);
+            let dodge_input = quantize_axis_inputs(self.state.controls.pyr() * PYR_SCALE);
+            let input_magnitude = dodge_input.x.abs() + dodge_input.y.abs() + dodge_input.z.abs();
             let is_flip_input = input_magnitude >= self.config.dodge_deadzone;
 
             let can_use = !self.state.is_auto_flipping
@@ -654,14 +699,11 @@ impl Car {
                 self.state.has_jumped = true;
 
                 if is_flip_input {
-                    const PYR_SCALE: Vec3A = Vec3A::new(-1.0, 1.0, 1.0);
-
                     self.state.flip_time = 0.0;
                     self.state.has_flipped = true;
                     self.state.is_flipping = true;
 
-                    let pyr = self.state.controls.pyr() * PYR_SCALE;
-                    let mut dodge_dir = quantize_axis_inputs(pyr);
+                    let mut dodge_dir = dodge_input;
                     dodge_dir.y += dodge_dir.z;
 
                     if dodge_dir.x.abs() < 0.1 && dodge_dir.y.abs() < 0.1 {
@@ -739,9 +781,7 @@ impl Car {
             return !still_flipping;
         }
 
-        if self.state.has_flipped {
-            self.state.flip_time += TICK_TIME;
-        }
+        self.state.flip_time += TICK_TIME;
 
         false
     }
@@ -752,7 +792,7 @@ impl Car {
         num_wheels_in_contact: usize,
         cached_upwards_dir: &mut Option<Vec3A>,
     ) {
-        if !self.sticky_gate_prev && self.state.world_contact_normal.is_none() {
+        if !self.sticky_gate_prev && self.state.cache.world_contact_normal.is_none() {
             return;
         }
 
@@ -767,7 +807,7 @@ impl Car {
                 }
             }
         } else {
-            self.state.world_contact_normal.unwrap()
+            self.state.cache.world_contact_normal.unwrap()
         };
 
         let ground_down_dir = -ground_up_dir;
@@ -826,7 +866,7 @@ impl Car {
                 self.state.is_boosting = true;
                 self.state.boosting_time += TICK_TIME;
                 self.state.time_since_boosted = 0.0;
-                let accel = if self.state.is_on_ground {
+                let accel = if self.state.cache.is_on_ground {
                     mutator_config.boost_accel_ground
                 } else {
                     mutator_config.boost_accel_air
@@ -842,7 +882,7 @@ impl Car {
             self.state.is_boosting = true;
             self.state.boosting_time += TICK_TIME;
             self.state.time_since_boosted = 0.0;
-            let accel = if self.state.is_on_ground {
+            let accel = if self.state.cache.is_on_ground {
                 mutator_config.boost_accel_ground
             } else {
                 mutator_config.boost_accel_air
@@ -871,7 +911,7 @@ impl Car {
     /// Apply ongoing-flip vertical damping before wheel updates.
     /// Keep flip timers unchanged until the per-car update.
     pub(crate) fn apply_flip_zdamp_prepass(&mut self, collision_world: &mut DiscreteDynamicsWorld) {
-        if self.state.is_demoed || self.state.is_on_ground || !self.state.is_flipping {
+        if self.state.is_demoed || self.state.cache.is_on_ground || !self.state.is_flipping {
             return;
         }
 
@@ -917,7 +957,7 @@ impl Car {
         self.state.controls = self.state.controls.clamp();
 
         let forward_speed_uu = rb.get_forward_speed() * BT_TO_UU;
-        let jump_pressed = self.state.controls.jump && !self.state.prev_controls.jump;
+        let jump_pressed = self.state.controls.jump && !self.state.cache.prev_controls.jump;
         let num_wheels_in_contact = self.state.num_wheels_in_contact();
 
         // The wheel contacts only change in `bullet_vehicle.update` below, so
@@ -930,18 +970,28 @@ impl Car {
             &mut cached_upwards_dir,
         );
 
-        if self.state.is_on_ground {
+        if self.state.cache.is_on_ground {
+            if self.state.is_flipping {
+                self.state.flip_time = 0.0;
+            }
+
             self.state.is_flipping = false;
         }
 
+        let was_is_jumping = self.state.is_jumping;
         self.update_jump(rb, mutator_config, jump_pressed);
         self.update_auto_flip(rb, jump_pressed);
         let prev_is_flipping = self.state.is_flipping;
         let prev_flip_time = self.state.flip_time;
-        let flip_ended =
-            self.update_double_jump_or_flip(rb, mutator_config, jump_pressed, forward_speed_uu);
+        let flip_ended = self.update_double_jump_or_flip(
+            rb,
+            mutator_config,
+            jump_pressed,
+            forward_speed_uu,
+            was_is_jumping,
+        );
 
-        if !self.state.is_on_ground {
+        if !self.state.cache.is_on_ground {
             self.update_air_torque(rb, num_wheels_in_contact, prev_is_flipping, prev_flip_time);
         }
 
@@ -953,12 +1003,12 @@ impl Car {
             && !self.state.is_flipping
             && !flip_ended
             && ((0 < num_wheels_in_contact && num_wheels_in_contact < 4)
-                || self.state.world_contact_normal.is_some())
+                || self.state.cache.world_contact_normal.is_some())
         {
             self.update_auto_roll(rb, num_wheels_in_contact, &mut cached_upwards_dir);
         }
 
-        self.state.world_contact_normal = None;
+        self.state.cache.world_contact_normal = None;
 
         self.update_boost(rb, mutator_config);
 
@@ -975,12 +1025,23 @@ impl Car {
             self.info.config.three_wheels,
         );
 
+        self.update_contact_state(collision_world);
+
+        self.sticky_gate_prev = self.bullet_vehicle.wheels.iter().any(|wheel| {
+            wheel
+                .raycast_info
+                .as_ref()
+                .is_some_and(|info| info.is_in_contact_with_world)
+        });
+    }
+
+    fn update_contact_state(&mut self, world: &DiscreteDynamicsWorld) {
         let mut num_wheels_in_contact = 0u8;
         for (wheel, contact) in self
             .bullet_vehicle
             .wheels
             .iter()
-            .zip(&mut self.state.wheels_with_contact)
+            .zip(&mut self.state.cache.wheels_with_contact)
         {
             let hit = wheel.raycast_info.as_ref().map(|info| {
                 // Wheel traces run in Bullet units; report uu like `cast_rays`.
@@ -990,20 +1051,13 @@ impl Car {
                     hit_point: info.contact_point * BT_TO_UU,
                     hit_normal: info.contact_normal,
                     hit_fraction: trace_len / wheel.real_ray_length,
-                    user_info: collision_world.bodies()[info.ground_body_idx].user_idx,
+                    user_info: world.bodies()[info.ground_body_idx].user_idx,
                 }
             });
             *contact = hit;
             num_wheels_in_contact += u8::from(hit.is_some());
         }
-        self.state.is_on_ground = num_wheels_in_contact >= 3;
-
-        self.sticky_gate_prev = self.bullet_vehicle.wheels.iter().any(|wheel| {
-            wheel
-                .raycast_info
-                .as_ref()
-                .is_some_and(|info| info.is_in_contact_with_world)
-        });
+        self.state.cache.is_on_ground = num_wheels_in_contact >= 3;
     }
 
     pub(crate) fn post_tick_update(&mut self, collision_world: &mut DiscreteDynamicsWorld) {
@@ -1046,7 +1100,7 @@ impl Car {
         // Re-arm the jump when the car lands after an airborne tick.
         if self.state.has_jumped
             && !self.state.is_jumping
-            && self.state.is_on_ground
+            && self.state.cache.is_on_ground
             && self.state.air_time > 0.0
         {
             let mut num_contacts = 0;
@@ -1065,14 +1119,14 @@ impl Car {
             }
         } else if self.state.has_jumped
             && !self.state.is_jumping
-            && self.state.is_on_ground
+            && self.state.cache.is_on_ground
             && self.state.jump_ticks > car_consts::jump::SETTLED_REARM_TICKS
         {
             self.state.has_jumped = false;
         }
 
         self.state.bump_cooldown_timer = (self.state.bump_cooldown_timer - TICK_TIME).max(0.0);
-        self.state.prev_controls = self.state.controls;
+        self.state.cache.prev_controls = self.state.controls;
     }
 
     pub(crate) fn finish_physics_tick(&mut self, rb: &mut RigidBody) {

@@ -32,7 +32,7 @@ class LearnerConfig:
 
     # Plays the newest save in RocketSimVis instead of training, switching to newer saves as they appear
     renderMode: bool = False
-    renderTimeScale: float = 1  # 2 = twice real speed
+    renderTimeScale: float = 1.2  # 2 = twice real speed
 
     ppo: PPOConfig = field(default_factory=PPOConfig)
 

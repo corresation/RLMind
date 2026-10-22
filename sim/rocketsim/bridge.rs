@@ -159,9 +159,9 @@ fn controls_from_rs(c: &RsControls) -> CarControls {
 fn car_to_rs(s: &CarState) -> RsCar {
     RsCar {
         phys: phys_to_rs(&s.phys),
-        prev_controls: controls_to_rs(&s.prev_controls),
-        is_on_ground: s.is_on_ground,
-        wheels_with_contact: s.wheels_with_contact.map(|w| w.is_some()),
+        prev_controls: controls_to_rs(s.prev_controls()),
+        is_on_ground: s.is_on_ground(),
+        wheels_with_contact: s.wheels_with_contact().map(|w| w.is_some()),
         has_jumped: s.has_jumped,
         has_double_jumped: s.has_double_jumped,
         has_flipped: s.has_flipped,
@@ -180,8 +180,8 @@ fn car_to_rs(s: &CarState) -> RsCar {
         is_auto_flipping: s.is_auto_flipping,
         auto_flip_timer: s.auto_flip_timer,
         auto_flip_torque_scale: s.auto_flip_torque_scale,
-        has_world_contact: s.world_contact_normal.is_some(),
-        world_contact_normal: to_rs(s.world_contact_normal.unwrap_or(Vec3A::ZERO)),
+        has_world_contact: s.world_contact_normal().is_some(),
+        world_contact_normal: to_rs(s.world_contact_normal().unwrap_or(Vec3A::ZERO)),
         bump_victim: s.bump_cooldown_victim.map_or(-1, |v| v as i32),
         bump_cooldown_timer: s.bump_cooldown_timer,
         is_demoed: s.is_demoed,
@@ -189,12 +189,12 @@ fn car_to_rs(s: &CarState) -> RsCar {
     }
 }
 
-// Fields RocketSim 2 doesn't have keep their v3 defaults
+// Fields RocketSim 2 doesn't have keep their v3 defaults, the world contact normal has no setter
 fn car_from_rs(c: &RsCar) -> CarState {
     let mut s = CarState::DEFAULT;
     s.phys = phys_from_rs(&c.phys);
-    s.prev_controls = controls_from_rs(&c.prev_controls);
-    s.is_on_ground = c.is_on_ground;
+    s.set_prev_controls(controls_from_rs(&c.prev_controls));
+    s.set_contact_flags(c.is_on_ground, c.wheels_with_contact);
     s.has_jumped = c.has_jumped;
     s.has_double_jumped = c.has_double_jumped;
     s.has_flipped = c.has_flipped;
@@ -213,7 +213,6 @@ fn car_from_rs(c: &RsCar) -> CarState {
     s.is_auto_flipping = c.is_auto_flipping;
     s.auto_flip_timer = c.auto_flip_timer;
     s.auto_flip_torque_scale = c.auto_flip_torque_scale;
-    s.world_contact_normal = c.has_world_contact.then(|| from_rs(c.world_contact_normal));
     s.bump_cooldown_victim = (c.bump_victim >= 0).then_some(c.bump_victim as usize);
     s.bump_cooldown_timer = c.bump_cooldown_timer;
     s.is_demoed = c.is_demoed;
@@ -419,7 +418,7 @@ pub unsafe extern "C" fn rs_arena_get(arena: *mut Arena, cars: *mut RsCar, ball:
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rs_arena_set_car(arena: *mut Arena, idx: u32, car: *const RsCar) {
-    unsafe { arena_ref(arena) }.set_car_state(idx as usize, car_from_rs(unsafe { &*car }));
+    unsafe { arena_ref(arena) }.set_car_state_full(idx as usize, car_from_rs(unsafe { &*car }));
 }
 
 #[unsafe(no_mangle)]
