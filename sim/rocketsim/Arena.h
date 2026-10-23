@@ -181,7 +181,7 @@ struct CarState : public PhysState {
 
 	// Returns true if the car is currently able to jump, double-jump, or flip
 	bool HasFlipOrJump() const {
-		return isOnGround || (!hasFlipped && !hasDoubleJumped && airTimeSinceJump < 1.25f);
+		return isOnGround || (!hasFlipped && !hasDoubleJumped && airTimeSinceJump + 1 / 120.f < 1.25f);
 	}
 
 	// Returns true if we currently have a flip, and got it from a flip reset (instead of a jump)
