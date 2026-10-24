@@ -31,9 +31,9 @@ class Agent:
 
         torch.set_num_threads(1)
 
-    def act(self, state: np.ndarray) -> np.ndarray:
+    def act(self, state: np.ndarray, mask=None) -> np.ndarray:
         with torch.no_grad():
-            action_idx, _ = self.policy.get_action(state, True)
+            action_idx, _ = self.policy.get_action(state, True, mask)
         action = np.array(self.action_parser.parse_actions([action_idx]))
         if action.ndim == 2 and action.shape[0] == 1:
             action = action[0]

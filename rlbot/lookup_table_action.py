@@ -44,6 +44,18 @@ class LookupTableAction:
     def get_action_space(self):
         return len(self._lookup_table)
 
+    # Sim's GetActionMask, no turtle check
+    def get_mask(self, player) -> np.ndarray:
+        t = self._lookup_table
+        ground = np.arange(len(t)) < 24
+        air = (~ground & (t[:, 5] == 0)) | (ground & (t[:, 0] == t[:, 6]) & ((t[:, 3] != 0) == (t[:, 7] == 1)))
+        mask = ground if player.on_ground else air
+        if player.boost_amount == 0:
+            mask = mask & (t[:, 6] == 0)
+        if player.on_ground or player.has_flip:
+            mask = mask | (t[:, 5] == 1)
+        return mask
+
     def parse_actions(self, actions: Any) -> np.ndarray:
         indexes = np.array(actions, dtype=np.int32)
         indexes = np.squeeze(indexes)

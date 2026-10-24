@@ -138,7 +138,7 @@ class ExampleBot(BaseAgent): # Skidded from LittleThing so sorry
                 obs = self.base_obs_builder.build_obs(player, self.game_state, self.action)
                 if self.obs_mean is not None and self.obs_std is not None:
                     obs = (obs - self.obs_mean) / self.obs_std
-                self.action = self.base_agent.act(obs)
+                self.action = self.base_agent.act(obs, self.base_agent.action_parser.get_mask(player))
                 #print(f"[bot] Using MAIN model (tick_skip={self.tick_skip}) - Action: {self.action}")
 
         if self.ticks >= self.tick_skip - 1:

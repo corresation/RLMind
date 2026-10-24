@@ -395,8 +395,11 @@ class Learner:
             # On start and after each goal or reset
             if checkSave:
                 saves = glob.glob(os.path.join(projectFolder, "out", "build", "*", "checkpoints", "*", "models.pt"))
-                if saves:
-                    newest = os.path.dirname(max(saves, key=os.path.getmtime))
+                try:
+                    newest = os.path.dirname(max(saves, key=os.path.getmtime)) if saves else None
+                except FileNotFoundError:
+                    newest = None  # Training deleted an old save mid-check, looks again next reset
+                if newest:
                     if newest != self.renderSave:
                         self.renderSave = newest
                         cfg.checkpointFolder = os.path.dirname(newest)

@@ -51,10 +51,12 @@ class DiscreteFF(nn.Module):
         return self.forward(obs)
 
 
-    def get_action(self, obs, deterministic=True):
+    def get_action(self, obs, deterministic=True, mask=None):
         probs = self.get_output(obs)
         probs = probs.view(-1, self.n_actions)
         probs = torch.clamp(probs, min=1e-11, max=1)
+        if mask is not None:
+            probs = probs * torch.as_tensor(mask, device=self.device)
         if deterministic:
             return probs.cpu().numpy().argmax(), 1
         action = torch.multinomial(probs, 1, True)
